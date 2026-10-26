@@ -3,6 +3,7 @@ from double_pendulum.simulation.simulation import Simulator
 from double_pendulum.controller.pid.point_pid_controller import PointPIDController
 from double_pendulum.utils.plotting import plot_timeseries
 
+
 plant = SymbolicDoublePendulum(mass=[0.6, 0.5],
                                length=[0.3, 0.2])
 
