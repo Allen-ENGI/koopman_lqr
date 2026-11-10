@@ -77,7 +77,6 @@ def main():
     viz.draw_conventions("figures/conventions.png")
 
     # Test near the target first, then move outwards (velocities = 0).
-    # the values are [dq1, dq2] offsets from the target angles in radians.
     offsets = [("tiny", [0.05, -0.05]), ("small", [0.20, -0.20]),
                ("medium", [0.50, -0.50]), ("large", [1.00, -1.00]),
                ("huge", [2.00, 1.50])]

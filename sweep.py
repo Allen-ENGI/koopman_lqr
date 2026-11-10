@@ -14,7 +14,8 @@ import config as cfg
 from plant_utils import make_plant, make_simulator
 from metrics import evaluate
 
-KEYS = ["success", "settling_time", "rmse_q", "cost_J", "effort", "sat_frac"]
+KEYS = ["success", "settling_time", "rmse_q", "cost_J", "effort", "sat_frac",
+        "alpha_hat", "c_hat"]
 _W = {}
 
 

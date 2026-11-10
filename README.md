@@ -43,22 +43,54 @@ Verify the import:
 
 - [x] Selected the DFKI simulation framework.
 - [x] Confirmed that DFKI imports work from this repository.
-- [ ] Verify the sample simulation and animation.
-- [ ] Define plant parameters and target equilibrium.
-- [ ] Implement the local-linearization LQR baseline.
-- [ ] Collect trajectories and identify a Koopman model.
-- [ ] Compare closed-loop performance.
+- [x] Verify the sample simulation and animation.
+- [x] Define plant parameters and target equilibrium (`config.py`).
+- [x] Implement the local-linearization LQR baseline.
+- [x] Collect trajectories and identify Koopman models.
+- [x] Compare closed-loop performance (maps, rates, regions of attraction).
+- [ ] Realistic-sensing repeat, report and presentation.
 
 ## Running
 
-Run the initial simulation example:
+    python run_local_lqr.py --map     # baseline: design, tests, figures, map
+    python collect_data.py            # identification data -> results/ident_data.npz
+    python scan_designs.py            # design-choice scan on validation starts (~2 min)
+    python run_koopman.py             # fit, design, DFKI maps, ROA, figures, table
+    python run_koopman.py --fast      # same, maps with the vectorized sweep
+    python hardware.py                # budget-rig plant parameters
 
-    python sample.py
+`run_koopman.py --stage fit|design|maps|roa|figures` runs one stage.
+
+## Code map
+
+| File | Role |
+|---|---|
+| `config.py` | every parameter: plant, target, dt, Q/R, torque limit, data, dictionaries |
+| `plant_utils.py` | DFKI plant + simulator, equilibrium, Jacobians, ZOH discretization |
+| `dynamics_np.py` | vectorized copy of DFKI's dynamics (checked to ~1e-13) |
+| `lqr_design.py` | discrete LQR with stabilizability / detectability (PBH) checks |
+| `controllers.py` | one controller for all methods: `u = sat(u* - K psi(x - x*))` |
+| `metrics.py` | success, settling, RMSE, cost J, effort, saturation, tail rate, c_hat |
+| `collect_data.py` | Stage 3 data, segmented at angle wraps, split by trajectory |
+| `koopman.py` | dictionaries (polynomial, trig), EDMDc fit, multistep prediction |
+| `stability.py` | Koopman LQR design, true-plant local rates, sampled ROA certificate |
+| `scan_designs.py` | training region x dictionary x gain design, on validation starts |
+| `sweep.py` / `fast_sweep.py` | initial-angle maps (DFKI / vectorized) |
+| `run_koopman.py` | Stages 4-5 pipeline and all comparison figures |
+| `viz.py`, `style.py` | figure helpers and the shared colour/line-style per controller |
 
 ## Experiments and Results
 
-To be added: experiment settings, prediction errors,
-control performance, and limitations.
+See `results/summary_ideal-ideal.md` and `figures/`.  Key design facts:
+
+* Infinite-horizon LQR on a polynomial lifted model is ill-posed at an
+  unstable equilibrium: products of unstable modes are unstable lifted
+  modes with vanishing control authority, so the Riccati gain blows up.
+* Wide-region least squares fits gravity with a secant, softer than the
+  tangent at upright, so wide-data models can fail to stabilize locally.
+* The Koopman controller's local behaviour is set by `K dpsi/dx(0)`; its
+  stability guarantee is for the model, the true plant is checked
+  separately (`stability.true_local_eigs`).
 
 ## Reproducibility
 

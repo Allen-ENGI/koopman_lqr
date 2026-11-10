@@ -4,7 +4,7 @@ Written for a general (possibly lifted) model z+ = A z + B v, so the
 Koopman models reuse exactly the same routine.
 """
 import numpy as np
-from scipy.linalg import solve_discrete_are, sqrtm
+from scipy.linalg import solve_discrete_are
 
 
 def pbh_stabilizable(A, B, tol=1e-8):
@@ -26,13 +26,20 @@ def pbh_detectable(A, Cq, tol=1e-8):
     return ok, bad
 
 
+def psd_sqrt(Q):
+    """Symmetric square root of a PSD matrix that may be rank deficient
+    (scipy's sqrtm returns NaNs for the lifted Q_z = C'QC)."""
+    w, V = np.linalg.eigh(0.5 * (Q + Q.T))
+    return V @ np.diag(np.sqrt(np.clip(w, 0.0, None))) @ V.T
+
+
 def dlqr(A, B, Q, R, check=True):
     """Gain K for v = -K z minimising sum z'Qz + v'Rv  subject to z+ = Az + Bv.
 
     Returns K, P (Riccati solution) and the closed-loop eigenvalues."""
     if check:
         ok_s, bad_s = pbh_stabilizable(A, B)
-        Qh = np.real(sqrtm(Q))
+        Qh = psd_sqrt(Q)
         ok_d, bad_d = pbh_detectable(A, Qh)
         if not ok_s:
             raise ValueError(f"(A,B) not stabilizable; bad modes: {bad_s}")

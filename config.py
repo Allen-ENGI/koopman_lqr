@@ -112,3 +112,41 @@ VEL_AVG_WINDOW = 0.1        # s, velocity averaging for the "at rest" test
 MAP_N = 41                   # grid points per axis
 MAP_RANGE = np.pi            # dq1, dq2 in [-MAP_RANGE, MAP_RANGE]
 SEED = 0
+
+# ------------------------------------------------ Koopman identification
+# Data: whole trajectories, split 60/20/20 by trajectory (never by sample).
+# Two kinds of trajectory, both starting across the whole map slice:
+#   closed: local LQR + random exploration torque (covers the region the
+#           controllers actually visit, incl. near-upright behaviour)
+#   open:   SHORT open-loop random torque bursts (falling behaviour near each
+#           start, without long swings around hanging-down that would
+#           dominate the least-squares fit)
+DATA_N_CLOSED, DATA_T_CLOSED = 600, 1.5      # trajectories, s
+DATA_N_OPEN, DATA_T_OPEN = 1200, 0.4
+DATA_V0 = 3.0                # initial velocities ~ U(-DATA_V0, DATA_V0) rad/s
+DATA_V_MAX = 15.0            # drop samples faster than this (rad/s)
+DATA_HOLD = (0.02, 0.10)     # s, random hold time of piecewise-constant inputs
+DATA_SPLIT = (0.6, 0.2, 0.2)
+# Observable dictionaries (names used everywhere):
+#   poly<d>: monomials of the scaled error up to degree d
+#            (poly1 = state only = DMDc, poly2 = quadratic, poly3 = cubic)
+#   trig<l>: physics-matched sin / cos observables (extension, koopman.TrigLift)
+PRED_DICTS = ["poly1", "poly2", "poly3", "poly4", "trig1", "trig2"]
+CONTROL_DICTS = ["poly1", "poly2", "poly3", "trig1", "trig2"]
+# Training region for the MAIN experiment: pairs with |dq1|,|dq2| <= R.
+# Same data for every dictionary.  Chosen on validation starts by
+# scan_designs.py (best for state-only and trig1; see results/scan.csv).
+KOOPMAN_R_TRAIN = 0.6        # rad
+LQR_METHOD = "inf"           # same gain design for every model
+RIDGE_GRID = [0.0, 1e-8, 1e-6, 1e-4, 1e-2]   # relative ridge weights
+PRED_HORIZON = 0.25          # s, horizon used to pick the ridge weight
+                             # (~2 time constants of the unstable modes;
+                             #  errors grow ~e^(7.6 t) open loop)
+PRED_PLOT_HORIZON = 0.5      # s, horizon shown in the prediction figures
+LIFTED_Q_EPS = 1e-6          # added on lifted states only if detectability fails
+
+# ------------------------------------------------ stability analysis
+RATE_E_HI = 0.5              # tail-rate fit window on sqrt(dx'Q dx)
+RATE_E_LO = 1e-4
+ROA_SAMPLES = 3_000_000      # 4-D samples for the sampled Lyapunov certificate
+ROA_V_BOX = 40.0             # rad/s, velocity half-width of the sampled box
