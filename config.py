@@ -1,16 +1,10 @@
-"""Single source of truth for the plant, target, sampling and cost.
+"""Single source of truth for the comparison.
 
-Every controller (local-linearization LQR and all Koopman LQRs) must
-import from here so that the comparison is fair.
-
-Two independent switches:
-  PLANT_PROFILE  "ideal"     : clean study plant (point masses at the tips)
-                 "hardware"  : the planned budget rig (hardware.py):
-                               GM5208-12 shoulder + GM3506 elbow, direct drive,
-                               3D-printed 12 / 10 cm links
-  REALISM        "ideal"     : perfect state, no delay, no Coulomb friction
-                 "realistic" : friction, encoder/velocity noise, 1-step delay,
-                               finite motor bandwidth (what the real rig will do)
+Section 1 holds the EXPERIMENT VARIABLES: the only values you change to
+compare the two controllers.  Both simulations read them:
+    run_local_lqr.py   local-linearization LQR
+    run_koopman.py     Koopman LQR (one controller per observable set)
+Everything after section 1 is held FIXED across every comparison.
 
 DFKI conventions (SymbolicDoublePendulum, formulas="UnderactuatedLecture"):
   * state  x = [q1, q2, dq1, dq2]
@@ -24,12 +18,74 @@ DFKI conventions (SymbolicDoublePendulum, formulas="UnderactuatedLecture"):
 """
 import numpy as np
 
-PLANT_PROFILE = "ideal"          # "ideal" | "hardware"
-REALISM = "ideal"                # "ideal" | "realistic"
+# =====================================================================
+# 1. EXPERIMENT VARIABLES  (change these; both simulations follow)
+# =====================================================================
+# Every run starts at   x0 = x* + [dq1, dq2, v1, v2]   and is scored on
+# whether it reaches x* (success) and at what cost J.  For a given
+# condition, the two simulations differ ONLY in the controller.
 
+# --- (a) Initial angles: Experiment 1 -------------------------------
+# (dq1, dq2) on an N x N grid; every controller runs from every point.
+MAP_N = 31                   # grid points per axis -> 31 x 31 = 961 starts
+MAP_RANGE = np.pi            # dq1, dq2 in [-MAP_RANGE, MAP_RANGE] rad
+
+# --- (b) Observables: Experiment 2 ------------------------------------
+# One Koopman controller per observable set z = psi(dx) = [dx ; extras]:
+#   "poly1"  state only (= DMDc)                               N = 4
+#   "poly2"  + all degree-2 products of the scaled error       N = 14
+#   "poly3"  + all degree-3 products                           N = 34
+#   "trig1"  + sin dq1, sin(dq1+dq2), sin dq2, 1 - cos dq2     N = 8
+#   "trig2"  + trig1 + sin dq2 * qd_i qd_j, (1 - cos dq2) dq_i N = 13
+# Local LQR has no observables (psi = dx, Taylor model).
+OBSERVABLES = ["poly1", "poly2", "poly3", "trig1", "trig2"]
+
+# --- (c) Main condition (used by Experiments 1 and 2) -----------------
+TORQUE_LIMIT_MAIN = [4.0, 1.0]   # N m; ideal plant only (holding torque is ~4.2 N m)
+INIT_VELOCITY_MAIN = (0.0, 0.0)  # rad/s, (qd1, qd2) at t = 0
+
+# --- (d) Robustness: change ONE variable at a time, rest at main ------
+TORQUE_SCALE_SWEEP = [0.9, 1.1, 1.25]   # x the main torque limit
+                                        # -> [3.6, 0.9], [4.4, 1.1], [5.0, 1.25] N m
+INIT_VELOCITY_SWEEP = [(2.0, 0.0), (-2.0, 0.0), (0.0, 3.0), (3.0, -3.0)]  # rad/s
+
+# --- Which simulator runs the maps ------------------------------------
+# "dfki": DFKI's own Simulator (any REALISM, ~3.5 min per 31 x 31 map on 2 cores)
+# "fast": vectorized copy of the same plant (matches DFKI to ~1e-13, ~30x
+#         faster, ideal sensing only; falls back to "dfki" otherwise)
+MAIN_SIMULATOR = "dfki"
+ROBUSTNESS_SIMULATOR = "fast"
+
+# --- Plant and sensing switches -----------------------------------------
+PLANT_PROFILE = "ideal"      # "ideal" (study plant) | "hardware" (budget rig, hardware.py)
+REALISM = "ideal"            # "ideal" | "realistic" (friction, noise, 5 ms delay)
+
+# =====================================================================
+# 2. FIXED for every comparison (same for both controllers)
+# =====================================================================
+X_STAR = np.array([np.pi, 0.0, 0.0, 0.0])   # target: both links upright
+DT = 0.005                   # s, 200 Hz: control period = RK4 step in DFKI
+T_FINAL = 5.0                # s per run
+INTEGRATOR = "runge_kutta"
+
+# Physical cost: used by BOTH designs and to score every trajectory
+Q = np.diag([10.0, 10.0, 1.0, 1.0])
+R = np.diag([1.0, 1.0])
+
+# Success: both angle errors < ANGLE_TOL and both velocities (averaged over
+# VEL_AVG_WINDOW) < VEL_TOL, held for HOLD_TIME before T_FINAL
+ANGLE_TOL = 0.05             # rad
+VEL_TOL = 0.2                # rad / s
+HOLD_TIME = 0.5              # s
+VEL_AVG_WINDOW = 0.1         # s
+COST_TIE = 0.01              # |J_a / J_b - 1| below this counts as a tie
+
+SEED = 0
 GRAVITY = 9.81
 
-# ---------------------------------------------------------------- plant
+# =====================================================================
+# 3. Plant (fixed per profile)
+# =====================================================================
 if PLANT_PROFILE == "ideal":
     # Point masses at the link tips: com = length, inertia = m * l^2.
     MASS = [0.6, 0.5]            # kg
@@ -40,12 +96,7 @@ if PLANT_PROFILE == "ideal":
     GEAR_RATIO = 1
     DAMPING = [0.05, 0.05]       # N m s / rad
     MOTOR_TORQUE_LIMIT = [np.inf, np.inf]
-    # Static gravity demand (arm horizontal) ~[4.2, 1.0] N m.  Local-LQR
-    # success on the zero-velocity slice (15x15 sweep):
-    #   [8, 2] 100%  [5, 1.3] 100%  [4.4, 1.1] 100%  [4, 1] 91%  [3.6, 0.9] 46%
-    # Above the static demand the slice is trivially 100%, so the study limit
-    # sits just below it to put the local-LQR boundary inside the map.
-    TORQUE_LIMIT = [4.0, 1.0]    # N m, the limit used in ALL experiments
+    TORQUE_LIMIT = list(TORQUE_LIMIT_MAIN)
 elif PLANT_PROFILE == "hardware":
     import hardware as _hw
     _p = _hw.build(torque_mode="rated")
@@ -54,15 +105,8 @@ elif PLANT_PROFILE == "hardware":
     # viscous damping placeholder, ~1% of rated torque per rad/s (identify!)
     DAMPING = list(0.01 * np.asarray(_p["TORQUE_LIMIT"]))
     MOTOR_TORQUE_LIMIT = _p["TORQUE_LIMIT"]
-    # Software limit for the study.  As in the ideal profile, the
-    # interesting regime puts the SHOULDER limit just below its static
-    # gravity demand.  The elbow demand is tiny (cogging-level), so the elbow
-    # keeps its full rated torque -- which lets the arm fold and shorten the
-    # lever, so the shoulder must sit further below its static demand.
-    # Local-LQR success on the slice (GM5208 + GM3506 rig, 15x15):
-    #   ratio 0.85: 100% / 100%   0.75: 75% / 32%   0.65: 24% / 24%
-    #   0.80 (25x25): 100% / 50%   (ideal / realistic).
-    # Realism matters a lot here; re-tune with run_local_lqr.py --map.
+    # Study limit: shoulder at 0.80 x its static gravity demand, elbow at
+    # its full rating (local-LQR success 100% ideal / 50% realistic).
     _need = _hw.static_torque_demand(_p)
     TORQUE_LIMIT = [min(0.80 * _need[0], MOTOR_TORQUE_LIMIT[0]), MOTOR_TORQUE_LIMIT[1]]
 else:
@@ -70,7 +114,7 @@ else:
 
 assert np.all(np.asarray(TORQUE_LIMIT) <= np.asarray(MOTOR_TORQUE_LIMIT))
 
-# ------------------------------------------------------- non-idealities
+# --------------------------------------------------------- sensing / actuation
 if REALISM == "ideal":
     COULOMB_FRIC = [0.0, 0.0]          # N m
     MEAS_NOISE = [0.0, 0.0, 0.0, 0.0]  # std of [q1, q2, dq1, dq2]
@@ -78,74 +122,42 @@ if REALISM == "ideal":
     TORQUE_NOISE = [0.0, 0.0]          # N m std
     MOTOR_RESPONSIVENESS = 1.0         # 1 = torque applied instantly
 elif REALISM == "realistic":
-    # Coulomb friction ~2.5% of the motor rating (order of magnitude from
-    # DFKI's identified bench); 14-bit AS5048A encoders with numerically
-    # differentiated velocity.
+    # Coulomb friction ~2.5% of the motor rating; 14-bit encoders with
+    # numerically differentiated velocity; one control period of delay.
     COULOMB_FRIC = list(0.025 * np.minimum(np.asarray(MOTOR_TORQUE_LIMIT), 4.0))
     MEAS_NOISE = [0.001, 0.001, 0.05, 0.05]
-    MEAS_DELAY = 0.005                 # one control period
-    TORQUE_NOISE = list(0.005 * np.minimum(np.asarray(MOTOR_TORQUE_LIMIT), 4.0))  # 0.5% of rating
+    MEAS_DELAY = 0.005
+    TORQUE_NOISE = list(0.005 * np.minimum(np.asarray(MOTOR_TORQUE_LIMIT), 4.0))
     MOTOR_RESPONSIVENESS = 0.8
 else:
     raise ValueError(REALISM)
 
-# --------------------------------------------------------------- target
-X_STAR = np.array([np.pi, 0.0, 0.0, 0.0])   # both links upright
-# U_STAR is computed from the plant (0 for upright, but not assumed).
-
-# ------------------------------------------------------------- sampling
-DT = 0.005                   # s, 200 Hz: control period = RK4 step in DFKI
-T_FINAL = 5.0                # s
-INTEGRATOR = "runge_kutta"
-
-# --------------------------------- physical cost (shared by ALL controllers)
-Q = np.diag([10.0, 10.0, 1.0, 1.0])
-R = np.diag([1.0, 1.0])
-
-# ------------------------------------------------------- success criterion
-ANGLE_TOL = 0.05             # rad
-VEL_TOL = 0.2                # rad / s
-HOLD_TIME = 0.5              # s the state must stay inside the tolerances
-VEL_AVG_WINDOW = 0.1        # s, velocity averaging for the "at rest" test
-
-# ------------------------------------------------------- initial-angle map
-MAP_N = 41                   # grid points per axis
-MAP_RANGE = np.pi            # dq1, dq2 in [-MAP_RANGE, MAP_RANGE]
-SEED = 0
-
-# ------------------------------------------------ Koopman identification
+# =====================================================================
+# 4. Koopman identification (fixed; same data for every observable set)
+# =====================================================================
 # Data: whole trajectories, split 60/20/20 by trajectory (never by sample).
-# Two kinds of trajectory, both starting across the whole map slice:
-#   closed: local LQR + random exploration torque (covers the region the
-#           controllers actually visit, incl. near-upright behaviour)
-#   open:   SHORT open-loop random torque bursts (falling behaviour near each
-#           start, without long swings around hanging-down that would
-#           dominate the least-squares fit)
+#   closed: local LQR + random exploration torque (region the controllers visit)
+#   open:   SHORT open-loop random torque bursts (falling behaviour)
 DATA_N_CLOSED, DATA_T_CLOSED = 600, 1.5      # trajectories, s
 DATA_N_OPEN, DATA_T_OPEN = 1200, 0.4
 DATA_V0 = 3.0                # initial velocities ~ U(-DATA_V0, DATA_V0) rad/s
 DATA_V_MAX = 15.0            # drop samples faster than this (rad/s)
 DATA_HOLD = (0.02, 0.10)     # s, random hold time of piecewise-constant inputs
 DATA_SPLIT = (0.6, 0.2, 0.2)
-# Observable dictionaries (names used everywhere):
-#   poly<d>: monomials of the scaled error up to degree d
-#            (poly1 = state only = DMDc, poly2 = quadratic, poly3 = cubic)
-#   trig<l>: physics-matched sin / cos observables (extension, koopman.TrigLift)
-PRED_DICTS = ["poly1", "poly2", "poly3", "poly4", "trig1", "trig2"]
-CONTROL_DICTS = ["poly1", "poly2", "poly3", "trig1", "trig2"]
-# Training region for the MAIN experiment: pairs with |dq1|,|dq2| <= R.
-# Same data for every dictionary.  Chosen on validation starts by
-# scan_designs.py (best for state-only and trig1; see results/scan.csv).
+# Fit only pairs with |dq1|, |dq2| <= KOOPMAN_R_TRAIN (chosen on validation
+# starts by scan_designs.py)
 KOOPMAN_R_TRAIN = 0.6        # rad
 LQR_METHOD = "inf"           # same gain design for every model
 RIDGE_GRID = [0.0, 1e-8, 1e-6, 1e-4, 1e-2]   # relative ridge weights
 PRED_HORIZON = 0.25          # s, horizon used to pick the ridge weight
-                             # (~2 time constants of the unstable modes;
-                             #  errors grow ~e^(7.6 t) open loop)
-PRED_PLOT_HORIZON = 0.5      # s, horizon shown in the prediction figures
+PRED_PLOT_HORIZON = 0.5      # s, horizon shown in the prediction figure
+PRED_DICTS = OBSERVABLES + ["poly4"]          # quartic: prediction only
+CONTROL_DICTS = OBSERVABLES                    # older name, kept for scripts
 LIFTED_Q_EPS = 1e-6          # added on lifted states only if detectability fails
 
-# ------------------------------------------------ stability analysis
+# =====================================================================
+# 5. Analysis settings
+# =====================================================================
 RATE_E_HI = 0.5              # tail-rate fit window on sqrt(dx'Q dx)
 RATE_E_LO = 1e-4
 ROA_SAMPLES = 3_000_000      # 4-D samples for the sampled Lyapunov certificate

@@ -1,8 +1,8 @@
 """Shared figure style: one fixed colour per controller (never by rank),
 plus a line style and marker so identity never relies on colour alone.
 Categorical palette validated for colour-vision deficiency (CVD) separation
-(dataviz validator: all checks pass; 3 slots < 3:1 contrast on white, so
-every figure also uses line style / markers / legends)."""
+(3 slots < 3:1 contrast on white, so every figure also uses line style /
+markers / legends)."""
 import matplotlib as mpl
 
 TEXT, TEXT2, GRID = "#0b0b0b", "#52514e", "#e4e3df"
@@ -16,10 +16,17 @@ LS = {"local": "-", "poly1": "--", "poly2": "-.", "poly3": ":",
       "trig1": "-", "trig2": "--", "poly4": ":", "taylor": "-"}
 MARKER = {"local": "o", "poly1": "s", "poly2": "^", "poly3": "v",
           "trig1": "D", "trig2": "P", "poly4": "x", "taylor": "o"}
-LABEL = {"local": "local LQR (Taylor)", "taylor": "Taylor linearization",
-         "poly1": "Koopman: state only", "poly2": "Koopman: quadratic",
-         "poly3": "Koopman: cubic", "poly4": "Koopman: quartic",
-         "trig1": "Koopman: trig (8)", "trig2": "Koopman: trig (13)"}
+# Every label says which controller and, for Koopman, which observables (N)
+LABEL = {"local": "Local LQR (Taylor model)",
+         "taylor": "Taylor linearization (N=4)",
+         "poly1": "Koopman, state only (N=4)",
+         "poly2": "Koopman, quadratic (N=14)",
+         "poly3": "Koopman, cubic (N=34)",
+         "poly4": "Koopman, quartic (N=69)",
+         "trig1": "Koopman, trig (N=8)",
+         "trig2": "Koopman, trig (N=13)"}
+SHORT = {"local": "Local LQR", "poly1": "K: state (4)", "poly2": "K: quadratic (14)",
+         "poly3": "K: cubic (34)", "trig1": "K: trig (8)", "trig2": "K: trig (13)"}
 
 
 def apply():
@@ -33,3 +40,9 @@ def apply():
         "axes.spines.top": False, "axes.spines.right": False,
         "savefig.dpi": 160, "savefig.bbox": "tight",
     })
+
+
+def title(fig, what, fixed, y=1.0):
+    """Two-line figure title: line 1 = what is compared / varied,
+    line 2 = what is held fixed."""
+    fig.suptitle(f"{what}\nFixed: {fixed}", fontsize=10, y=y)

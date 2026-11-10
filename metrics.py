@@ -30,7 +30,7 @@ def convergence_rate(T, dX, Q=cfg.Q, e_hi=cfg.RATE_E_HI, e_lo=cfg.RATE_E_LO):
 
 
 def evaluate(T, X, U, u_star, x_star=cfg.X_STAR, Q=cfg.Q, R=cfg.R,
-             torque_limit=cfg.TORQUE_LIMIT, angle_tol=cfg.ANGLE_TOL,
+             torque_limit=None, angle_tol=cfg.ANGLE_TOL,
              vel_tol=cfg.VEL_TOL, hold_time=cfg.HOLD_TIME):
     T = np.asarray(T)
     X = np.asarray(X, dtype=float)
@@ -64,6 +64,8 @@ def evaluate(T, X, U, u_star, x_star=cfg.X_STAR, Q=cfg.Q, R=cfg.R,
 
     alpha, c = convergence_rate(T, dX) if success else (np.nan, np.nan)
 
+    if torque_limit is None:          # read at call time: conditions change it
+        torque_limit = cfg.TORQUE_LIMIT
     stage = (np.einsum("ki,ij,kj->k", dX, Q, dX)
              + np.einsum("ki,ij,kj->k", dU, R, dU))
     lim = np.asarray(torque_limit)

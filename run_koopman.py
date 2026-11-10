@@ -1,14 +1,24 @@
-"""Stages 4-5: Koopman predictors, LQR on each lifted model, and the
-stability / convergence / region-of-attraction comparison with local LQR.
+"""SIMULATION 2 of 2: Koopman LQR, and the comparison with local LQR.
 
-    python collect_data.py                 # stage 3 (once)
-    python scan_designs.py                 # design-choice scan (validation starts)
-    python run_koopman.py                  # all stages below
-    python run_koopman.py --stage fit      # or: design | maps | roa | figures
-    python run_koopman.py --fast           # maps with the vectorized sweep
-                                           # (identical plant, ideal only)
-Fairness rules: same plant, Q, R, torque limit, dt, initial states and
-training data for every model; same gain design (cfg.LQR_METHOD) for all.
+Design: lift the error z = psi(dx) with each observable set in
+config.OBSERVABLES, fit z+ = A_z z + B_z du to data, solve the same Riccati
+equation (Q_z = C'QC, same R) -> u = sat(u* - K_z psi(dx)).  Then simulate
+every Koopman controller over the SAME experiment conditions as
+run_local_lqr.py (config.py, section 1) and compare.
+
+    python collect_data.py                    # identification data (once)
+    python scan_designs.py                    # design-choice scan (validation starts)
+    python run_local_lqr.py --maps all        # SIMULATION 1: local LQR maps
+    python run_koopman.py                     # SIMULATION 2: all stages below
+    python run_koopman.py --stage fit         # or: design | maps | roa | figures
+    python run_koopman.py --stage maps --maps main     # only Experiment 1 / 2 maps
+
+What is compared (config.py, section 1):
+  Experiment 1  initial angles          -> axes of every map
+  Experiment 2  observables             -> one Koopman controller per set
+  Robustness    torque limit, initial velocity, one changed at a time
+Fixed for all: plant, target, dt, Q, R, success test, initial-angle grid,
+training data, gain design (infinite-horizon LQR).
 """
 import argparse
 import csv
@@ -23,6 +33,7 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap
 
 import config as cfg
+import experiments as ex
 import collect_data as cd
 import koopman as kp
 import stability as st
@@ -31,9 +42,9 @@ from controllers import LiftedLQRController
 from fast_sweep import identity_lift
 from run_local_lqr import design_local_lqr
 
-TAG = f"{cfg.PLANT_PROFILE}-{cfg.REALISM}"
+TAG = ex.TAG
 RES, FIG = "results", "figures"
-MAP_N = 31
+FIXED_MAIN = ex.MAIN.describe()
 os.makedirs(RES, exist_ok=True); os.makedirs(FIG, exist_ok=True)
 style.apply()
 
@@ -61,9 +72,14 @@ def controller_parts(name):
     return m["K"], m["P"], lift
 
 
-def suitable_names():
+def koopman_names():
+    """Koopman controllers whose gain stabilizes the real plant near x*."""
     info = json.load(open(f"{RES}/design_summary.json"))
-    return ["local"] + [n for n in cfg.CONTROL_DICTS if info[n]["suitable"]]
+    return [n for n in cfg.OBSERVABLES if info[n]["suitable"]]
+
+
+def suitable_names():
+    return ["local"] + koopman_names()
 
 
 # ============================================================ stage: fit
@@ -136,8 +152,11 @@ def fig_prediction():
     ax[2].set_ylabel("joint-angle RMSE [rad] (inside region)")
     ax[2].set_title("multistep error vs observable count", fontsize=9)
     ax[2].legend(fontsize=7, loc="upper left", bbox_to_anchor=(1.01, 1.0))
-    fig.suptitle("Open-loop multistep prediction on held-out test trajectories", fontsize=11)
     fig.tight_layout()
+    style.title(fig, "Experiment 2: observables varied. Open-loop multistep prediction error "
+                "on held-out test trajectories",
+                f"same training data (|dq| <= {cfg.KOOPMAN_R_TRAIN} rad) and test inputs for "
+                "every model; no controller in the loop", y=1.08)
     fig.savefig(f"{FIG}/koopman_prediction.png")
     plt.close(fig)
 
@@ -218,32 +237,32 @@ def fig_eigs(summary=None):
         a.set_xlabel("Re s [1/s]")
     ax[0].set_ylabel("Im s [1/s]")
     ax[0].legend(loc="lower left", fontsize=7)
-    fig.suptitle("Closed-loop eigenvalues, s = ln(z)/dt  (stable: Re s < 0). "
-                 "The guarantee holds for the model; the true plant decides.", fontsize=10)
     fig.tight_layout()
+    style.title(fig, "Experiment 2: observables varied. Closed-loop eigenvalues s = ln(z)/dt "
+                "(stable: Re s < 0): lifted model vs real plant, same gain",
+                "Q, R, dt and the gain design (infinite-horizon LQR)", y=1.1)
     fig.savefig(f"{FIG}/koopman_eigenvalues.png")
     plt.close(fig)
 
 
 # ============================================================ stage: maps
-def stage_maps(fast=False):
-    names = suitable_names()
-    for name in names:
-        path = f"{RES}/map_{name}_{TAG}.npz"
-        if fast:
-            import fast_sweep as fs
-            K, P, lift = controller_parts(name)
-            res = fs.run_map(K, lift, design_local_lqr()["u_star"], n=MAP_N)
-        else:
-            from sweep import run_map
-            fac = local_factory if name == "local" else functools.partial(koopman_factory, name)
-            res = run_map(fac, n=MAP_N)
-        np.savez(path, **res)
-        print(f"map {name:6s}: success {100 * res['success'].mean():5.1f}%", flush=True)
+def stage_maps(which="all"):
+    """Simulate every suitable Koopman controller over the conditions.
+    Local LQR maps come from run_local_lqr.py (SIMULATION 1)."""
+    from sweep import run_map
+    names = koopman_names()
+    print(f"=== Koopman maps: {which} conditions x {names}, "
+          f"{cfg.MAP_N} x {cfg.MAP_N} initial angles each ===")
+    for cond in ex.conditions(which):
+        for name in names:
+            res = run_map(functools.partial(koopman_factory, name), cond)
+            path = ex.save_map(name, cond, res)
+            print(f"{cond.name:16s} {name:6s} [{res['simulator']}]  success "
+                  f"{100 * res['success'].mean():5.1f}%   -> {path}", flush=True)
 
 
-def load_map(name):
-    return dict(np.load(f"{RES}/map_{name}_{TAG}.npz"))
+def load_map(name, cond=ex.MAIN):
+    return ex.load_map(name, cond)
 
 
 # ============================================================ stage: roa
@@ -273,13 +292,14 @@ def fig_success_maps(names):
                  cmap=cmap, vmin=0, vmax=1, alpha=0.85)
         a.contour(g, g, r["success"].astype(float), levels=[0.5], colors=style.TEXT, linewidths=0.8)
         a.plot(0, 0, "+", color="white", ms=10, mew=2)
-        a.set_title(f"{style.LABEL[name]}\nconverges from {100 * r['success'].mean():.0f}% of slice",
-                    fontsize=8)
+        a.set_title(f"{style.LABEL[name]}\nreaches upright from {100 * r['success'].mean():.1f}% "
+                    "of starts", fontsize=8)
         a.set_xlabel(r"$\Delta q_1(0)$ [rad]"); a.grid(False)
     np.atleast_1d(ax)[0].set_ylabel(r"$\Delta q_2(0)$ [rad]")
-    fig.suptitle("Experiment 1: where each controller converges (green) or fails (red), "
-                 "velocities start at 0  [DFKI simulator]", fontsize=10)
     fig.tight_layout()
+    style.title(fig, "Experiments 1 + 2: initial angles varied (axes), controller and "
+                "observables varied (panels). Green = reaches upright, red = fails",
+                f"{FIXED_MAIN}; {cfg.MAP_N} x {cfg.MAP_N} starts", y=1.1)
     fig.savefig(f"{FIG}/maps_success_all.png"); plt.close(fig)
 
 
@@ -312,11 +332,13 @@ def fig_who_wins(names):
                    label=f"{l} ({100 * np.mean(cls == k):.0f}%)")
         a.plot([], [], "--", color=style.COLOR["local"], lw=1, label="local-LQR basin boundary")
         a.legend(loc="upper center", bbox_to_anchor=(0.5, -0.18), fontsize=7, ncol=1)
-        a.set_title(f"local LQR vs {style.LABEL[n]}", fontsize=8)
+        a.set_title(f"Local LQR vs {style.LABEL[n]}", fontsize=8)
         a.set_xlabel(r"$\Delta q_1(0)$ [rad]"); a.grid(False)
     np.atleast_1d(ax)[0].set_ylabel(r"$\Delta q_2(0)$ [rad]")
-    fig.suptitle("Who controls better? Success first, then the common cost J", fontsize=10)
     fig.tight_layout()
+    style.title(fig, "Who controls better from each initial angle? Reaching upright wins; "
+                "if both do, lower cost J wins (within 1% = tie)",
+                f"{FIXED_MAIN}; the same {cfg.MAP_N * cfg.MAP_N} starts for both", y=1.1)
     fig.savefig(f"{FIG}/maps_who_wins.png"); plt.close(fig)
 
 
@@ -346,9 +368,10 @@ def fig_roa(names):
         a.set_xlabel(r"$\Delta q_1$ [rad]"); a.set_aspect("equal")
     np.atleast_1d(ax)[0].set_ylabel(r"$\Delta q_2$ [rad]")
     fig.tight_layout()
-    fig.suptitle("Regions of attraction on the zero-velocity slice.  Light fill: empirical basin "
-                 "(simulated).  Dark fill: sampled Lyapunov certificate {V <= rho*}.  "
-                 "Dashed blue: local-LQR certified set.", fontsize=9, y=1.05)
+    style.title(fig, "Regions of attraction by controller. Light fill: starts that reach upright "
+                "(simulated). Dark fill: sampled Lyapunov certificate {V <= rho*}. "
+                "Dashed blue: local-LQR certificate",
+                f"{FIXED_MAIN}", y=1.12)
     fig.savefig(f"{FIG}/roa_shapes.png"); plt.close(fig)
 
     # zoom: certified shapes only, overlaid (contour of V at rho*: smooth)
@@ -369,8 +392,8 @@ def fig_roa(names):
     a.legend(loc="upper left", fontsize=7)
     a.set_title("Certified sets {V <= rho*}, V = psi' P psi from each controller's Riccati.\n"
                 "Torque saturation, not the model, limits them: local, state-only and\n"
-                "trig coincide (sin x ~ x at this size); quadratic is smaller and bent.",
-                fontsize=8)
+                "trig coincide (sin x ~ x at this size); quadratic is smaller and bent.\n"
+                f"Fixed: {FIXED_MAIN}", fontsize=8)
     fig.tight_layout()
     fig.savefig(f"{FIG}/roa_certified_overlay.png"); plt.close(fig)
 
@@ -424,10 +447,12 @@ def fig_timeseries(names):
                 ax[2 + j].axhline(s * cfg.TORQUE_LIMIT[j], color=style.TEXT2, ls=":", lw=0.8)
         ax[0].legend(loc="upper right")
         ax[3].set_xlabel("time [s]")
-        fig.suptitle(f"Joint angles and torques from dq0 = [{d1:.2f}, {d2:.2f}] rad "
-                     f"({'only Koopman converges' if key == 'koopman_only' else 'both converge'})"
-                     "  [DFKI simulator]", fontsize=10)
         fig.tight_layout()
+        verdict = ("only Koopman reaches upright" if key == "koopman_only"
+                   else "both reach upright")
+        style.title(fig, f"Joint angles and torques vs time from initial angles dq0 = "
+                    f"[{d1:.2f}, {d2:.2f}] rad: Local LQR vs {style.LABEL[best]} ({verdict})",
+                    f"{FIXED_MAIN}; DFKI simulator", y=1.04)
         fig.savefig(f"{FIG}/timeseries_{key}.png"); plt.close(fig)
     return best, pick
 
@@ -468,8 +493,7 @@ def fig_convergence(names, pick):
                        color=style.COLOR[n], ms=9, capsize=4, lw=1.5)
     for a in ax[1:]:
         a.set_xticks(range(len(names)))
-        a.set_xticklabels([style.LABEL[n].replace("Koopman: ", "K: ") for n in names],
-                          rotation=25, ha="right", fontsize=7)
+        a.set_xticklabels([style.SHORT[n] for n in names], rotation=25, ha="right", fontsize=7)
     ax[1].plot([], [], "_", color=style.TEXT, ms=14, mew=2, label="local theory (true plant)")
     ax[1].plot([], [], "o", color=style.TEXT2, label="measured tail rate: median, IQR")
     ax[1].legend(fontsize=7, loc="upper left")
@@ -480,6 +504,9 @@ def fig_convergence(names, pick):
     ax[2].set_title(r"overshoot / saturation: $e(t) \leq \hat c\, e(0)\, e^{-\hat\alpha t}$",
                     fontsize=9)
     fig.tight_layout()
+    style.title(fig, "How fast each controller converges: near the target all share the "
+                "linear rate; differences come from the transient (saturation, overshoot)",
+                f"{FIXED_MAIN}; rates measured over the starts each controller stabilizes", y=1.1)
     fig.savefig(f"{FIG}/convergence_rates.png"); plt.close(fig)
 
 
@@ -509,8 +536,10 @@ def fig_scan():
                     f"  (local LQR: {100 * loc[meth]:.0f}%)", fontsize=9)
         a.grid(False)
         fig.colorbar(im, ax=a, label="validation success [%]")
-    fig.suptitle("Sensitivity: success on 400 random validation starts", fontsize=10)
     fig.tight_layout()
+    style.title(fig, "Design choice (not a result): validation success vs training region "
+                "and observables, for two gain designs",
+                f"400 random validation starts (not the reported grid); {FIXED_MAIN}", y=1.1)
     fig.savefig(f"{FIG}/scan_sensitivity.png"); plt.close(fig)
 
 
@@ -552,6 +581,94 @@ def summary_table(names):
     print("\n".join(md))
 
 
+def _robust_rates(names):
+    """Success (%) of every controller under every condition.  Returns the
+    conditions that have maps for all controllers, and their rates."""
+    conds, rates, missing = [], {}, []
+    for cond in ex.conditions("all"):
+        try:
+            rates[cond.name] = {n: 100 * load_map(n, cond)["success"].mean() for n in names}
+            conds.append(cond)
+        except FileNotFoundError as e:
+            missing.append(str(e).split(";")[0])
+    return conds, rates, missing
+
+
+def fig_robustness(names):
+    """Robustness: one variable changed at a time, the rest at main."""
+    conds, rates, missing = _robust_rates(names)
+    if missing:
+        print("robustness figure skipped, missing maps:\n  " + "\n  ".join(missing))
+        return None
+    torque = sorted([c for c in conds if c.group in ("main", "torque")],
+                    key=lambda c: c.torque_scale)
+    vel = [c for c in conds if c.group in ("main", "velocity")]
+    fig, ax = plt.subplots(1, 2, figsize=(13, 4.2))
+    x = [c.torque_limit[0] for c in torque]
+    for n in names:
+        ax[0].plot(x, [rates[c.name][n] for c in torque], color=style.COLOR[n], ls=style.LS[n],
+                   marker=style.MARKER[n], label=style.LABEL[n])
+    ax[0].axvline(ex.MAIN.torque_limit[0], color=style.TEXT2, ls=":", lw=1)
+    ax[0].annotate("main", (ex.MAIN.torque_limit[0], 2), xytext=(4, 0),
+                   textcoords="offset points", fontsize=8, color=style.TEXT2)
+    ax[0].set_xticks(x)
+    ax[0].set_xticklabels([f"[{c.torque_limit[0]:g}, {c.torque_limit[1]:g}]" for c in torque])
+    ax[0].set_xlabel("torque limit [joint 1, joint 2] (N\u00b7m)")
+    ax[0].set_ylabel("starts that reach upright (%)")
+    ax[0].set_ylim(0, 103)
+    ax[0].set_title(f"Torque limit varied; initial velocity "
+                    f"({', '.join(f'{v:g}' for v in ex.MAIN.v0)}) rad/s", fontsize=9)
+    ax[0].legend(loc="lower right", fontsize=7)
+    k = len(names)
+    for i, n in enumerate(names):
+        off = (i - (k - 1) / 2) * 0.12
+        ax[1].plot(np.arange(len(vel)) + off, [rates[c.name][n] for c in vel], ls="none",
+                   marker=style.MARKER[n], color=style.COLOR[n], ms=8, label=style.LABEL[n])
+    ax[1].set_xticks(range(len(vel)))
+    ax[1].set_xticklabels([("main (0, 0)" if c.group == "main" else
+                            f"({c.v0[0]:g}, {c.v0[1]:g})") for c in vel], fontsize=8)
+    ax[1].set_xlabel("initial velocity (qd1, qd2) at t = 0 (rad/s)")
+    ax[1].set_ylabel("starts that reach upright (%)")
+    ax[1].set_ylim(0, 103)
+    ax[1].set_title(f"Initial velocity varied; torque limit "
+                    f"[{', '.join(f'{v:g}' for v in ex.MAIN.torque_limit)}] N\u00b7m", fontsize=9)
+    fig.tight_layout()
+    style.title(fig, "Robustness: one variable changed at a time; success over the same "
+                f"{cfg.MAP_N} x {cfg.MAP_N} initial angles",
+                f"everything else at the main condition; {ex.SENSING}; "
+                "robustness maps use the fast copy of the DFKI plant", y=1.1)
+    fig.savefig(f"{FIG}/robustness.png"); plt.close(fig)
+    # table: condition x controller
+    head = "| condition (one variable changed) | " + " | ".join(style.SHORT[n] for n in names) + " |"
+    md = [head, "|" + "---|" * (len(names) + 1)]
+    for c in conds:
+        md.append(f"| {c.label()} | " + " | ".join(f"{rates[c.name][n]:.1f}%" for n in names) + " |")
+    open(f"{RES}/summary_robustness_{TAG}.md", "w").write("\n".join(md) + "\n")
+    print("\n".join(md))
+    return rates
+
+
+def slide_table(names):
+    """Five-column summary for a slide (main condition)."""
+    design = json.load(open(f"{RES}/design_summary.json"))
+    base = load_map("local")
+    md = ["| controller | observables N | reaches upright | local rate alpha (1/s) | "
+          "median cost vs local LQR |", "|---|---|---|---|---|"]
+    for n in ["local"] + cfg.OBSERVABLES:
+        d = design[n]
+        if n in names:
+            r = load_map(n); both = r["success"] & base["success"]
+            ratio = np.median(r["cost_J"][both] / base["cost_J"][both])
+            md.append(f"| {style.LABEL[n]} | {d['n_obs']} | {100 * r['success'].mean():.1f}% | "
+                      f"{d['alpha_true']:.2f} | {ratio:.3f} |")
+        else:
+            md.append(f"| {style.LABEL[n]} | {d['n_obs']} | not usable: gain destabilizes "
+                      "the real plant | \u2014 | \u2014 |")
+    md.append(f"\nFixed: {FIXED_MAIN}; {cfg.MAP_N} x {cfg.MAP_N} initial angles.")
+    open(f"{RES}/summary_slide_{TAG}.md", "w").write("\n".join(md) + "\n")
+    print("\n".join(md))
+
+
 def stage_figures():
     names = suitable_names()
     fig_success_maps(names)
@@ -562,17 +679,20 @@ def stage_figures():
     if os.path.exists(f"{RES}/scan.csv"):
         fig_scan()
     summary_table(names)
+    slide_table(names)
+    fig_robustness(names)
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--stage", default="all",
                     choices=["all", "fit", "design", "maps", "roa", "figures"])
-    ap.add_argument("--fast", action="store_true", help="vectorized maps (ideal only)")
+    ap.add_argument("--maps", default="all", choices=["main", "robust", "all"],
+                    help="which conditions the maps stage simulates (config.py, section 1)")
     a = ap.parse_args()
     if a.stage in ("all", "fit"): stage_fit()
     if a.stage in ("all", "design"): stage_design()
-    if a.stage in ("all", "maps"): stage_maps(a.fast)
+    if a.stage in ("all", "maps"): stage_maps(a.maps)
     if a.stage in ("all", "roa"): stage_roa()
     if a.stage in ("all", "figures"): stage_figures()
 

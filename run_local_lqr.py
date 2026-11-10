@@ -1,8 +1,15 @@
-"""Stage 1-2: verify the plant and build the local-linearization LQR baseline.
+"""SIMULATION 1 of 2: local-linearization LQR.
 
-    python run_local_lqr.py              # design, 5 test runs, figures, GIF
-    python run_local_lqr.py --map        # + initial-angle map (Experiment 1)
-    python run_local_lqr.py --live       # + DFKI live animation of one run
+Design: linearize the plant at x*, discretize (zero-order hold), solve the
+discrete Riccati equation -> u = sat(u* - K dx).  Then simulate it over the
+experiment conditions defined in config.py, section 1 (the same conditions
+run_koopman.py uses for the Koopman controllers).
+
+    python run_local_lqr.py               # design + 5 test runs + figures + GIF
+    python run_local_lqr.py --maps main   # + Experiment 1 map (initial angles)
+    python run_local_lqr.py --maps robust # + robustness maps (torque, velocity)
+    python run_local_lqr.py --maps all    # + both
+    python run_local_lqr.py --live        # + DFKI live animation of one run
 """
 import argparse
 import os
@@ -11,6 +18,7 @@ import numpy as np
 import matplotlib
 
 import config as cfg
+import experiments as ex
 from plant_utils import (make_plant, make_simulator, equilibrium_input,
                          linearize, c2d_zoh)
 from lqr_design import dlqr
@@ -20,7 +28,7 @@ from metrics import evaluate
 os.makedirs("figures", exist_ok=True)
 os.makedirs("results", exist_ok=True)
 np.set_printoptions(precision=4, suppress=True)
-TAG = f"{cfg.PLANT_PROFILE}-{cfg.REALISM}"
+TAG = ex.TAG
 
 
 def design_local_lqr():
@@ -34,7 +42,8 @@ def design_local_lqr():
 
 
 def local_lqr_factory():
-    """Picklable factory used by sweep.run_map."""
+    """Picklable factory used by sweep.run_map (reads cfg.TORQUE_LIMIT,
+    which the condition sets)."""
     d = design_local_lqr()
     return (LiftedLQRController(d["K"], cfg.X_STAR, d["u_star"],
                                 cfg.TORQUE_LIMIT, name="local LQR"), d["u_star"])
@@ -49,11 +58,29 @@ def simulate(plant, controller, x0, animate=False, seed=cfg.SEED):
     return np.asarray(T), np.asarray(X), np.asarray(U)
 
 
+def run_maps(which, viz):
+    """Simulate local LQR from every initial state of every condition."""
+    from sweep import run_map
+    print(f"\n=== Local LQR maps: {which} conditions, {cfg.MAP_N} x {cfg.MAP_N} "
+          f"initial angles each ===")
+    for cond in ex.conditions(which):
+        res = run_map(local_lqr_factory, cond)
+        path = ex.save_map("local", cond, res)
+        print(f"{cond.name:16s} [{res['simulator']}]  success "
+              f"{100 * res['success'].mean():5.1f}%   ({cond.describe()})  -> {path}",
+              flush=True)
+        what = ("Experiment 1: initial angles varied. Where does local LQR stabilize the arm?"
+                if cond.group == "main" else
+                f"Robustness ({cond.label()}): initial angles varied, local LQR")
+        viz.plot_map(res, f"{what}\nFixed: {cond.describe()}",
+                     f"figures/map_local__{cond.name}_{TAG}.png")
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--map", action="store_true", help="run the initial-angle sweep")
+    ap.add_argument("--maps", choices=["main", "robust", "all"],
+                    help="simulate the experiment conditions (config.py, section 1)")
     ap.add_argument("--live", action="store_true", help="DFKI live animation")
-    ap.add_argument("--n", type=int, default=cfg.MAP_N, help="map grid size")
     args = ap.parse_args()
     if not args.live:
         matplotlib.use("Agg")
@@ -61,6 +88,7 @@ def main():
 
     plant = make_plant()                     # simulation (truth) plant
     d = design_local_lqr()
+    main_cond = ex.MAIN.describe()
 
     print(f"=== Plant / target  [{TAG}] ===")
     print("mass", cfg.MASS, " length", cfg.LENGTH, " com", np.round(cfg.COM, 4))
@@ -77,6 +105,7 @@ def main():
     viz.draw_conventions("figures/conventions.png")
 
     # Test near the target first, then move outwards (velocities = 0).
+    # the values are [dq1, dq2] offsets from the target angles in radians.
     offsets = [("tiny", [0.05, -0.05]), ("small", [0.20, -0.20]),
                ("medium", [0.50, -0.50]), ("large", [1.00, -1.00]),
                ("huge", [2.00, 1.50])]
@@ -91,23 +120,20 @@ def main():
         print(f"{name:8s} {str([d1, d2]):>16s} {('yes' if m['success'] else 'NO'):>4s} "
               f"{m['settling_time']:7.2f} {m['rmse_q']:7.3f} {m['cost_J']:8.2f} "
               f"{m['effort']:8.2f} {100 * m['sat_frac']:6.1f}")
-        viz.plot_run(T, X, U, f"Local LQR, {name}: dq0 = {[d1, d2]}  [{TAG}]",
+        viz.plot_run(T, X, U,
+                     f"Local LQR test run from initial angles dq0 = {[d1, d2]} rad"
+                     f"\nFixed: {main_cond}",
                      f"figures/local_lqr_{TAG}_{name}.png")
-        runs.append((f"{name} {[d1, d2]}", T, X, U))
+        runs.append((f"dq0 = {[d1, d2]} rad", T, X, U))
         if name == "large":
             viz.save_animation(T, X, U, f"figures/local_lqr_{TAG}_{name}.gif",
-                               title=f"Local LQR, dq0 = {[d1, d2]}")
-    viz.plot_overlay(runs, f"Local LQR, growing initial offsets  [{TAG}]",
+                               title=f"Local LQR, dq0 = {[d1, d2]} rad")
+    viz.plot_overlay(runs, "Local LQR: initial angle offset grows, convergence slows"
+                     f"\nFixed: {main_cond}",
                      f"figures/local_lqr_{TAG}_overlay.png")
 
-    if args.map:
-        from sweep import run_map
-        print(f"\n=== Initial-angle map {args.n}x{args.n} ===")
-        res = run_map(local_lqr_factory, n=args.n)
-        np.savez(f"results/map_local_lqr_{TAG}.npz", **res)
-        print(f"success on slice: {100 * res['success'].mean():.1f}%")
-        viz.plot_map(res, f"Local-linearization LQR  [{TAG}]",
-                     f"figures/map_local_lqr_{TAG}.png")
+    if args.maps:
+        run_maps(args.maps, viz)
 
     if args.live:
         simulate(plant, ctrl, cfg.X_STAR + np.array([0.5, -0.5, 0, 0]), animate=True)

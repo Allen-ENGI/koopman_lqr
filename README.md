@@ -52,14 +52,29 @@ Verify the import:
 
 ## Running
 
-    python run_local_lqr.py --map     # baseline: design, tests, figures, map
-    python collect_data.py            # identification data -> results/ident_data.npz
-    python scan_designs.py            # design-choice scan on validation starts (~2 min)
-    python run_koopman.py             # fit, design, DFKI maps, ROA, figures, table
-    python run_koopman.py --fast      # same, maps with the vectorized sweep
-    python hardware.py                # budget-rig plant parameters
+The comparison is two simulations over the same conditions. Every variable
+that is changed lives in `config.py`, section 1 (EXPERIMENT VARIABLES):
 
-`run_koopman.py --stage fit|design|maps|roa|figures` runs one stage.
+| Variable | Role | Config name |
+|---|---|---|
+| Initial angles (dq1, dq2) | Experiment 1: swept on a grid inside every condition | `MAP_N`, `MAP_RANGE` |
+| Observables | Experiment 2: one Koopman controller per set | `OBSERVABLES` |
+| Torque limit | Robustness: one condition per value | `TORQUE_LIMIT_MAIN`, `TORQUE_SCALE_SWEEP` |
+| Initial velocity | Robustness: one condition per value | `INIT_VELOCITY_MAIN`, `INIT_VELOCITY_SWEEP` |
+
+Everything else in `config.py` is held fixed for both controllers.
+
+    python collect_data.py                 # identification data (once)
+    python scan_designs.py                 # design-choice scan on validation starts
+    python run_local_lqr.py --maps all     # SIMULATION 1: local LQR, every condition
+    python run_koopman.py                  # SIMULATION 2: Koopman fit, design, maps,
+                                           #   certificates, comparison figures
+
+`--maps main|robust|all` picks the conditions; `run_koopman.py --stage
+fit|design|maps|roa|figures` runs one stage. Maps are saved as
+`results/maps/<profile>-<realism>/<controller>__<condition>.npz`, so both
+simulations line up condition by condition. `MAIN_SIMULATOR` and
+`ROBUSTNESS_SIMULATOR` choose DFKI's simulator or its vectorized copy.
 
 ## Code map
 
@@ -75,7 +90,8 @@ Verify the import:
 | `koopman.py` | dictionaries (polynomial, trig), EDMDc fit, multistep prediction |
 | `stability.py` | Koopman LQR design, true-plant local rates, sampled ROA certificate |
 | `scan_designs.py` | training region x dictionary x gain design, on validation starts |
-| `sweep.py` / `fast_sweep.py` | initial-angle maps (DFKI / vectorized) |
+| `experiments.py` | turns section 1 of `config.py` into named conditions shared by both simulations |
+| `sweep.py` / `fast_sweep.py` | initial-angle maps for one condition (DFKI / vectorized) |
 | `run_koopman.py` | Stages 4-5 pipeline and all comparison figures |
 | `viz.py`, `style.py` | figure helpers and the shared colour/line-style per controller |
 
