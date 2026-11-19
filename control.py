@@ -17,7 +17,7 @@ from double_pendulum.controller.abstract_controller import AbstractController
 import config as cfg
 import koopman as kp
 from plant import (make_plant, equilibrium_input, linearize, c2d_zoh, wrap_angle,
-                   state_error, VecPlant)
+                   state_error, VecPlant, design_scales)
 from tool_lib import identity_lift, max_angle_error
 
 
@@ -295,7 +295,7 @@ class TrackingController(AbstractController):
 # ------------------------------------------------------------ physics-based
 def physics_feedforward(ref):
     """Inverse dynamics of the (possibly wrong) model along the path."""
-    model = VecPlant(coulomb_fric=[0.0, 0.0], mass_scale=cfg.MODEL_ERROR)
+    model = VecPlant(coulomb_fric=[0.0, 0.0], mass_scale=design_scales())
     return model.inverse_dynamics(ref["X"], ref["QDD"])
 
 
@@ -303,7 +303,7 @@ def tvlqr_gains(ref, U_ff):
     """Time-varying LQR along the reference with the model's Jacobians
     (same linearization + zero-order hold as the stabilizing local LQR).
     Terminal cost: infinite-horizon LQR at the final (held) point."""
-    model = make_plant(for_design=True)                  # masses x MODEL_ERROR
+    model = make_plant(for_design=True)                  # masses x model error
     X = ref["X"]
     N = len(X)
     A, B = [], []
@@ -318,6 +318,16 @@ def tvlqr_gains(ref, U_ff):
         P = cfg.Q + A[k].T @ P @ (A[k] - B[k] @ Kk)
         K[k] = Kk
     return K
+
+
+def linear_controller(ref, d):
+    """FAIR local-linearization tracker: the upright Taylor model (d from
+    design_local_lqr()) gives BOTH the gain and the feedforward, computed with
+    the same least-squares feedforward as the Koopman trackers (psi = identity).
+    Koopman vs this one = linear model vs lifted model, nothing else differs."""
+    U_ff = koopman_feedforward(d["Ad"], d["Bd"], identity_lift, ref) + d["u_star"]
+    return TrackingController(ref["T"], ref["X"], U_ff, d["K"], cfg.TORQUE_LIMIT,
+                              name="local_linear")
 
 
 def physics_controllers(ref, local_K):
@@ -376,3 +386,39 @@ def koopman_controllers(ref, models):
     return ctrls
 
 
+
+
+# ------------------------------------------------------------ path check
+def _lift_jacobian(lift, dx, h=1e-6):
+    """d psi / d dx at one point (central differences), shape (n, 4)."""
+    E = h * np.eye(4)
+    return ((lift(dx[None] + E) - lift(dx[None] - E)) / (2 * h)).T
+
+
+def path_stability(ctrl, ref, every=10):
+    """Frozen-time check along the path, the tracking version of the balance
+    suitability test (an analysis check: it uses the TRUE plant's Jacobians).
+
+    Near the reference point x_ref(t) the tracking law acts like the linear
+    gain K_eff = K_x + K_extra * d psi_extra / dx (x_ref).  For state-only
+    observables K_eff = K is constant; for trig and polynomial observables
+    it changes along the path (cos dq, 3 dq^2, ...).  At every `every`-th
+    point this returns the spectral radius of A_true - B_true K_eff.
+    Frozen-time radii >= 1 do not prove failure (and < 1 does not prove
+    success), but they show where the gain stops stabilizing the arm.
+    Returns (% of checked points with radius >= 1, max radius)."""
+    true = make_plant(for_design=False)
+    dX = _wrapped_error(ref["X"])
+    rho = []
+    for k in range(0, len(ref["X"]), every):
+        Kk = ctrl.K[k] if ctrl.K.ndim == 3 else ctrl.K
+        if ctrl.lift is None:
+            K_eff = Kk
+        else:
+            J = _lift_jacobian(ctrl.lift, dX[k])          # (n, 4), first 4 rows = I
+            K_eff = Kk[:, :4] + Kk[:, 4:] @ J[4:]
+        Ac, Bc = true.linear_matrices(ref["X"][k], ctrl.U_ff[k])
+        Ad, Bd = c2d_zoh(np.asarray(Ac, float), np.asarray(Bc, float), cfg.DT)
+        rho.append(np.max(np.abs(np.linalg.eigvals(Ad - Bd @ K_eff))))
+    rho = np.asarray(rho)
+    return 100.0 * float(np.mean(rho >= 1.0)), float(rho.max())

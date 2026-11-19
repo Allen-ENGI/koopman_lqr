@@ -744,7 +744,7 @@ def fig_robustness(names):
         return None
     titles = {"torque": ("torque limit [joint 1, joint 2] (N\u00b7m)", "Torque limit varied"),
               "velocity": ("initial velocity (qd1, qd2) (rad/s)", "Initial velocity varied"),
-              "model": ("design-model masses (\u00d7 true)",
+              "model": (f"{tl._model_what()} (\u00d7 true)",
                         "Model error varied (physics designs only)"),
               "plant": ("arm masses (\u00d7 nominal)",
                         "Plant changed (all controllers blind)"),

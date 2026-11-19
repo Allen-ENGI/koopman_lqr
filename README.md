@@ -60,7 +60,7 @@ that is changed lives in `config.py`, section 1 (EXPERIMENT VARIABLES):
 | Initial angles (dq1, dq2) | main: grid inside every condition, also grouped by distance from upright | fixed: starts on the letter | `MAP_N`, `MAP_RANGE`, `DISTANCE_EDGES` |
 | Observables | main: one Koopman controller per set | main: one Koopman controller per set | `OBSERVABLES`, `TRACK_OBSERVABLES` |
 | Region size | the distance bands of the map | two scenes: small letter near upright, large letters around the shoulder | `DISTANCE_EDGES`, `TRACK_SCENES`, `TRACK_RUN` |
-| Model error (physics designs only) | robustness (default) | robustness (default) | `MODEL_ERROR_SWEEP`, `ROBUSTNESS`, `TRACK_ROBUSTNESS` |
+| Model error (physics designs only) | robustness (default) | robustness (default) | `MODEL_ERROR_SWEEP`, `MODEL_ERROR_LINKS` ("elbow" = wrong mass ratio; "both" = only rescales the gain), `ROBUSTNESS`, `TRACK_ROBUSTNESS` |
 | Torque limit, initial velocity, plant change, sensor noise | optional robustness | optional (plant, noise) | add to `ROBUSTNESS` / `TRACK_ROBUSTNESS` |
 
 Robustness changes one variable at a time; the others stay at their main value.

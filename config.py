@@ -42,7 +42,14 @@ DISTANCE_EDGES = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.5]   # rad, band edges
 #   "trig1"  + sin dq1, sin(dq1+dq2), sin dq2, 1 - cos dq2     N = 8
 #   "trig2"  + trig1 + sin dq2 * qd_i qd_j, (1 - cos dq2) dq_i N = 13
 # Local LQR has no observables (psi = dx, Taylor model).
-OBSERVABLES = ["poly1", "poly2", "poly3", "trig1", "trig2"]
+# Control experiments use three sets, one per point:
+#   poly1  data alone (no new observables): same as local linearization
+#   poly2  more, but generic observables: worse (even functions in an
+#          odd-symmetric system)
+#   trig1  the right observables (match gravity): better
+# poly3 and trig2 are fitted for the prediction figure only (their LQR
+# gains destabilize the real arm: spurious, undetectable lifted modes).
+OBSERVABLES = ["poly1", "poly2", "trig1"]
 
 # --- (c) Main condition (used by Experiments 1 and 2) -----------------
 TORQUE_LIMIT_MAIN = [4.0, 1.0]   # N m; ideal plant only (holding torque is ~4.2 N m)
@@ -60,6 +67,15 @@ INIT_VELOCITY_SWEEP = [(2.0, 0.0), (-2.0, 0.0), (0.0, 3.0), (3.0, -3.0)]  # rad/
 # so this tests "physics model wrong, data right".
 MODEL_ERROR_MAIN = 1.0                 # 1.0 = exact model
 MODEL_ERROR_SWEEP = [0.8, 1.2]
+# Which links the error is applied to:
+#   "both"      both links scaled together.  Gravity and inertia scale alike,
+#               so the linear model A_c is unchanged and only B_c -> B_c / s:
+#               the same as a +-20% feedback gain, which LQR tolerates easily
+#               (local LQR 88.6 / 90.8 / 95.5% at x0.8 / x1 / x1.2).
+#   "elbow"     link 2 only (or "shoulder": link 1 only).  The mass RATIO is
+#               wrong, so A_c itself changes: a wrong model SHAPE, the harder
+#               test of "data vs physics".
+MODEL_ERROR_LINKS = "elbow"
 
 # --- (f) Plant change: BOTH experiments (balance and tracking) ---------
 # The SIMULATED arm's link masses and inertias are scaled; every controller
@@ -86,8 +102,10 @@ TRACK_ROBUSTNESS = ["model"]           # tracking (run_tracking.py)
 
 # --- (h) Experiment 3: drawing a letter (tracking a continuous path) -----
 # Two scenes = the same "small vs large region" question as the balance maps:
-#   small  a small letter above the shoulder, near upright: inside the
-#          region the balance Koopman models were trained on
+#   small  a small letter above the shoulder: the TIP stays near upright,
+#          but the elbow must bend 0.9-1.6 rad to reach it, far outside
+#          the balance training region (|dq| <= 0.6 rad), so tracking
+#          refits every Koopman model on |dq| <= 1.8 rad
 #   large  letters centred ON the shoulder, so the arm sweeps the whole
 #          workspace (through hanging-down).  The tip only reaches
 #          |l1 - l2| .. l1 + l2 (0.1-0.5 m) from the shoulder.
@@ -218,7 +236,7 @@ LQR_METHOD = "inf"           # same gain design for every model
 RIDGE_GRID = [0.0, 1e-8, 1e-6, 1e-4, 1e-2]   # relative ridge weights
 PRED_HORIZON = 0.25          # s, horizon used to pick the ridge weight
 PRED_PLOT_HORIZON = 0.5      # s, horizon shown in the prediction figure
-PRED_DICTS = OBSERVABLES + ["poly4"]          # quartic: prediction only
+PRED_DICTS = ["poly1", "poly2", "poly3", "poly4", "trig1", "trig2"]   # prediction figure
 CONTROL_DICTS = OBSERVABLES                    # older name, kept for scripts
 LIFTED_Q_EPS = 1e-6          # added on lifted states only if detectability fails
 # Tracking (Experiment 3) moves the arm far from upright, so its Koopman

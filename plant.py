@@ -21,6 +21,14 @@ import config as cfg
 # ======================================================================
 # DFKI plant, simulator, linearization
 # ======================================================================
+def design_scales(error=None):
+    """Per-link (shoulder, elbow) mass scale of the physics design model:
+    cfg.MODEL_ERROR on the links named by cfg.MODEL_ERROR_LINKS."""
+    e = cfg.MODEL_ERROR if error is None else float(error)
+    return {"both": (e, e), "shoulder": (e, 1.0),
+            "elbow": (1.0, e)}[cfg.MODEL_ERROR_LINKS]
+
+
 def make_plant(for_design=False):
     """The one nonlinear plant used for every experiment.
 
@@ -31,15 +39,15 @@ def make_plant(for_design=False):
       * drops Coulomb friction.  DFKI smooths it as cf*atan(100*qd), whose
         slope at qd = 0 is 100*cf, so a Jacobian would contain a fictitious
         huge damper; the design treats it as an unmodelled disturbance.
-      * scales both link masses and inertias by cfg.MODEL_ERROR
-        (1.0 = exact model).  Koopman models never use this: they are
-        fitted to data from the true plant."""
-    scale = cfg.MODEL_ERROR if for_design else cfg.PLANT_MASS
+      * scales link masses and inertias by cfg.MODEL_ERROR on the links in
+        cfg.MODEL_ERROR_LINKS (1.0 = exact model).  Koopman models never
+        use this: they are fitted to data from the true plant."""
+    s = design_scales() if for_design else (cfg.PLANT_MASS, cfg.PLANT_MASS)
     return SymbolicDoublePendulum(
-        mass=[scale * m for m in cfg.MASS],
+        mass=[k * m for k, m in zip(s, cfg.MASS)],
         length=cfg.LENGTH,
         com=cfg.COM,
-        inertia=[scale * i for i in cfg.INERTIA],
+        inertia=[k * i for k, i in zip(s, cfg.INERTIA)],
         damping=cfg.DAMPING,
         coulomb_fric=[0.0, 0.0] if for_design else cfg.COULOMB_FRIC,
         gravity=cfg.GRAVITY,
@@ -131,12 +139,13 @@ def c2d_zoh(Ac, Bc, dt):
 # ======================================================================
 class VecPlant:
     def __init__(self, coulomb_fric=None, mass_scale=1.0):
-        """mass_scale != 1 builds a WRONG model (link masses and inertias
-        scaled), used only for physics-based feedforward under model error."""
-        self.m1, self.m2 = (mass_scale * m for m in cfg.MASS)
+        """mass_scale != 1 scales link masses and inertias: one number for
+        both links, or a (shoulder, elbow) pair (plant.design_scales())."""
+        s1, s2 = np.broadcast_to(np.asarray(mass_scale, dtype=float), (2,))
+        self.m1, self.m2 = s1 * cfg.MASS[0], s2 * cfg.MASS[1]
         self.l1, self.l2 = cfg.LENGTH
         self.r1, self.r2 = cfg.COM
-        self.I1, self.I2 = (mass_scale * i for i in cfg.INERTIA)
+        self.I1, self.I2 = s1 * cfg.INERTIA[0], s2 * cfg.INERTIA[1]
         self.b1, self.b2 = cfg.DAMPING
         cf = cfg.COULOMB_FRIC if coulomb_fric is None else coulomb_fric
         self.cf1, self.cf2 = cf

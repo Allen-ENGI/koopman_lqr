@@ -12,8 +12,10 @@ Varied (config.py, section 1):
 Fixed per scene: letters, centre, size, drawing time, torque limit; Q, R, dt.
 
 Controllers (control.py), each using only its own model:
-  local_fixed  upright LQR gain + inverse-dynamics feedforward  (physics)
-  tvlqr        time-varying LQR along the path + inverse dynamics (physics)
+  local_fixed  upright LQR gain + EXACT nonlinear inverse-dynamics feedforward
+  tvlqr        time-varying LQR along the path + exact inverse dynamics
+               (both get the full nonlinear model: a ceiling, not a peer;
+               the fair local-linearization baseline is run_tracking_fair.py)
   Koopman      every set in TRACK_OBSERVABLES, refit on data covering the letter
 Physics controllers are designed under each condition (so model error reaches
 them); Koopman controllers are fitted once per letter from the true arm's data.
@@ -42,7 +44,7 @@ import tool_lib as tl
 from tool_lib import (build_reference, letter_points, max_angle_error, tracking_metrics,
                       letter_size, reach)
 from control import (design_local_lqr, physics_controllers, fit_tracking_models,
-                     koopman_controllers)
+                     koopman_controllers, path_stability, _wrapped_error)
 
 FIG = "figures"
 PHYSICS = ["local_fixed", "tvlqr"]
@@ -120,9 +122,14 @@ def check(scenes):
             for cond in tracking_conditions():
                 with tracking(cond, sc):
                     ref = sc.reference(letter)
+                    d = _wrapped_error(ref["X"])
                     print(f"  {cond.label():22s} torque needed {ref['torque_need']}  "
-                          f"max |dq| from upright {max_angle_error(ref):.2f} rad  "
                           f"{'ok' if ref['feasible'] else 'EXCEEDS LIMIT'}")
+            print(f"  joint offsets from upright along the path: "
+                  f"dq1 {d[:, 0].min():+.2f}..{d[:, 0].max():+.2f} rad, "
+                  f"dq2 {d[:, 1].min():+.2f}..{d[:, 1].max():+.2f} rad "
+                  f"(balance Koopman models: |dq| <= {cfg.KOOPMAN_R_TRAIN} rad; tracking "
+                  f"refits on |dq| <= {min(np.pi, max_angle_error(ref) + cfg.TRACK_R_MARGIN):.2f} rad)")
 
 
 # ------------------------------------------------------------ simulation
@@ -149,10 +156,13 @@ def run_letter(sc, letter):
             ctrls.update(koop)
             print(f"\n[{sc.tag(letter)} | {cond.label()}]  ({describe(cond, sc)})")
             for name in order:
+                # frozen-time check of the gain along the path (true plant)
+                unst, rho = path_stability(ctrls[name], ref)
                 T, X, U = simulate(ctrls[name], ref)
                 m, P = tracking_metrics(T, X, U, ref, pts)
                 rows.append(dict(scene=sc.name, letter=letter, condition=cond.name,
-                                 group=cond.group, label=cond.label(), controller=name, **m))
+                                 group=cond.group, label=cond.label(), controller=name,
+                                 path_unstable_pct=unst, path_max_rho=rho, **m))
                 n = min(len(X), len(U), len(ref["T"]))
                 arrays[f"path|{cond.name}|{name}"] = P
                 arrays[f"err|{cond.name}|{name}"] = np.linalg.norm(P[:n] - ref["P"][:n], axis=1)
@@ -160,7 +170,8 @@ def run_letter(sc, letter):
                 if cond.group == "main":
                     arrays[f"x|main|{name}"] = np.asarray(X)[:n]    # for the GIF
                 print(f"  {tl.LABEL[name]:40s} shape {m['shape_mm']:8.2f} mm  "
-                      f"RMSE {m['rmse_mm']:8.2f} mm  sat {m['sat_pct']:5.1f}%"
+                      f"RMSE {m['rmse_mm']:8.2f} mm  sat {m['sat_pct']:5.1f}%  "
+                      f"gain unstable on {unst:5.1f}% of path (max radius {rho:.3f})"
                       f"{'  DIVERGED' if m['diverged'] else ''}", flush=True)
     with open(os.path.join(out, "results.csv"), "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
@@ -173,8 +184,10 @@ def _load(sc, letter):
     out = sc.out_dir(letter)
     rows = list(csv.DictReader(open(os.path.join(out, "results.csv"))))
     for r in rows:
-        for k in ("rmse_mm", "max_mm", "shape_mm", "final_mm", "sat_pct", "peak_u1", "peak_u2"):
-            r[k] = float(r[k])
+        for k in ("rmse_mm", "max_mm", "shape_mm", "final_mm", "sat_pct", "peak_u1", "peak_u2",
+                  "path_unstable_pct", "path_max_rho"):
+            if k in r:
+                r[k] = float(r[k])
         r["diverged"] = r["diverged"] == "True"
     arr = dict(np.load(os.path.join(out, "paths.npz")))
     return rows, arr, [str(n) for n in arr["order"]]
@@ -185,6 +198,13 @@ def _cell(rows, cond_name, n):
     if not r:
         return "—"
     return "diverged" if r[0]["diverged"] else f"{r[0]['shape_mm']:.2f}"
+
+
+def _unstable(rows, n):
+    r = [q for q in rows if q["condition"] == "main" and q["controller"] == n]
+    if not r or "path_unstable_pct" not in r[0]:
+        return "—"
+    return f"{r[0]['path_unstable_pct']:.0f}%"
 
 
 def _workspace(a):
@@ -322,6 +342,12 @@ def table(sc, letter, rows, order):
     for cond in tracking_conditions():
         md.append(f"| {cond.label()} | " + " | ".join(_cell(rows, cond.name, n)
                                                       for n in order) + " |")
+    md.append("| gain unstable along the path, main (% of points) | " + " | ".join(
+        _unstable(rows, n) for n in order) + " |")
+    md += ["", "Last row: frozen-time check of each controller's effective gain "
+           "K_x + K_extra dpsi/dx at points along the path, on the true arm's "
+           "Jacobians (the tracking version of the balance suitability check). "
+           "Non-zero means the gain stops stabilizing the arm somewhere on the letter."]
     open(os.path.join(sc.out_dir(letter), "summary_tracking.md"), "w").write("\n".join(md) + "\n")
     print("\n".join(md))
 
@@ -351,6 +377,8 @@ def table_all(scenes):
             md.append(f"| {sc.name}, {letter} | {cond.label()} | "
                       + " | ".join(_cell(rows, cond.name, n) for n in order)
                       + f" | {best} |")
+        md.append(f"| {sc.name}, {letter} | gain unstable along path (main) | "
+                  + " | ".join(_unstable(rows, n) for n in order) + " | |")
     path = os.path.join("results", "tracking", tl.TAG, "summary_scenes.md")
     open(path, "w").write("\n".join(md) + "\n")
     print("\n" + "\n".join(md))

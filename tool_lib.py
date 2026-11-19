@@ -56,7 +56,7 @@ class Condition:
         return {"main": "main",
                 "torque": f"torque_x{self.torque_scale:.2f}",
                 "velocity": f"vel_{self.v0[0]:+.1f}_{self.v0[1]:+.1f}",
-                "model": f"model_x{self.model_error:.2f}",
+                "model": f"model{_model_tag()}_x{self.model_error:.2f}",
                 "plant": f"plant_x{self.plant_mass:.2f}",
                 "noise": f"noise_x{self.noise_level:.2f}"}[self.group]
 
@@ -72,7 +72,7 @@ class Condition:
         parts = [f"torque limit [{_fmt(self.torque_limit)}] N·m",
                  f"initial velocity ({_fmt(self.v0)}) rad/s",
                  "exact design model" if self.model_error == 1.0 else
-                 f"design-model masses ×{self.model_error:g}",
+                 f"{_model_what()} ×{self.model_error:g}",
                  "nominal arm" if self.plant_mass == 1.0 else
                  f"arm masses ×{self.plant_mass:g}",
                  "no sensor noise" if self.noise_level == 0 else
@@ -85,7 +85,7 @@ class Condition:
         return {"main": "main",
                 "torque": f"torque ×{self.torque_scale:g} [{_fmt(self.torque_limit)}] N·m",
                 "velocity": f"velocity ({_fmt(self.v0)}) rad/s",
-                "model": f"design-model masses ×{self.model_error:g}",
+                "model": f"{_model_what()} ×{self.model_error:g}",
                 "plant": f"arm masses ×{self.plant_mass:g}",
                 "noise": f"sensor noise ×{self.noise_level:g}"}[self.group]
 
@@ -98,6 +98,16 @@ class Condition:
 
 
 MAIN = Condition("main")
+
+
+def _model_what():
+    """What the model error scales, for labels (config.MODEL_ERROR_LINKS)."""
+    return {"both": "design-model masses", "shoulder": "design-model shoulder mass",
+            "elbow": "design-model elbow mass"}[cfg.MODEL_ERROR_LINKS]
+
+
+def _model_tag():
+    return "" if cfg.MODEL_ERROR_LINKS == "both" else f"_{cfg.MODEL_ERROR_LINKS}"
 
 
 def torque_conditions():
