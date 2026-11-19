@@ -1,23 +1,136 @@
-"""Stage 4: Koopman lifted predictors (Korda & Mezic 2018, EDMD with input).
+"""Koopman models: identification data and lifted linear predictors.
 
-Lift      z = psi(dx) = [dx ; monomials of s = dx / sigma, degree 2..d]
-Predictor z_{k+1} = A z_k + B du_k,     dx_k = C z_k,  C = [I 0]
+  Data        generate(), segment(), split(), load_data(), pairs()
+              (whole trajectories, cut at angle wraps, split by trajectory)
+  Observables PolyLift (poly1 state only, poly2 quadratic, poly3 cubic, ...),
+              TrigLift (trig1, trig2), make_lift()
+  Fitting     fit() (ridge least squares for [A B]), fit_dictionary()
+  Prediction  predict(), multistep_rmse(), windows()
 
-* psi(0) = 0 (equilibrium-centred, no constant observable -- a constant has
-  eigenvalue 1, is uncontrollable and would break stabilizability).
-* The state is the first block of z, so C = [I 0] exactly and the physical
-  cost maps to Q_z = C' Q C without any fitted output map.
-* Monomials use the error scaled by its training std so every column is
-  O(1); the state block itself is unscaled.
-* [A B] solves a ridge-regularised least squares on one-step pairs; the
-  ridge weight is chosen by MULTISTEP error on the validation trajectories.
+Predictor (Korda & Mezic 2018):  z = psi(dx) = [dx ; observables],
+z+ = A z + B du,  dx = C z with C = [I 0],  psi(0) = 0.
 """
 from itertools import combinations_with_replacement
 
 import numpy as np
 
 import config as cfg
+from plant import VecPlant, wrap_angle
 
+
+# ======================================================================
+# Identification data
+# ======================================================================
+def _piecewise_constant(rng, n_traj, n_steps, amp):
+    """Random torques held for random durations in DATA_HOLD."""
+    U = np.zeros((n_traj, n_steps, 2))
+    lo, hi = (int(round(h / cfg.DT)) for h in cfg.DATA_HOLD)
+    for i in range(n_traj):
+        k = 0
+        while k < n_steps:
+            L = rng.integers(lo, hi + 1)
+            U[i, k:k + L] = rng.uniform(-amp, amp)
+            k += L
+    return U
+
+
+def _rollout(rng, vp, n, T, closed, K, u_star):
+    steps = int(round(T / cfg.DT))
+    lim = np.asarray(cfg.TORQUE_LIMIT)
+    dx0 = np.column_stack([rng.uniform(-np.pi, np.pi, (n, 2)),
+                           rng.uniform(-cfg.DATA_V0, cfg.DATA_V0, (n, 2))])
+    x = cfg.X_STAR + dx0
+    W = _piecewise_constant(rng, n, steps, (0.5 if closed else 1.0) * lim)
+    X = np.zeros((n, steps + 1, 4)); U = np.zeros((n, steps, 2))
+    X[:, 0] = x
+    for k in range(steps):
+        if closed:
+            dx = x - cfg.X_STAR
+            dx[:, :2] = wrap_angle(dx[:, :2])
+            u = vp.sat(u_star - dx @ K.T + W[:, k])
+        else:
+            u = vp.sat(W[:, k])
+        x = vp.rk4_step(x, u)
+        X[:, k + 1] = x; U[:, k] = u
+    dX = X - cfg.X_STAR
+    dX[..., :2] = wrap_angle(dX[..., :2])
+    return dX, U - u_star
+
+
+def generate(seed=cfg.SEED, K=None, u_star=None):
+    """Returns two lists of trajectories (closed-loop, open-loop)."""
+    rng = np.random.default_rng(seed)
+    vp = VecPlant()
+    c = _rollout(rng, vp, cfg.DATA_N_CLOSED, cfg.DATA_T_CLOSED, True, K, u_star)
+    o = _rollout(rng, vp, cfg.DATA_N_OPEN, cfg.DATA_T_OPEN, False, K, u_star)
+    return c, o
+
+
+def segment(dX, dU, min_len=20):
+    """Cut trajectories at wrap jumps / overspeed.  Returns list of
+    (parent_id, dX_seg (L+1,4), dU_seg (L,2))."""
+    jump = np.any(np.abs(np.diff(dX[..., :2], axis=1)) > np.pi, axis=2)
+    fast = np.any(np.abs(dX[..., 2:]) > cfg.DATA_V_MAX, axis=2)
+    ok = ~jump & ~fast[:, :-1] & ~fast[:, 1:]               # (n, steps) per pair
+    segs = []
+    for i in range(dX.shape[0]):
+        k = 0
+        while k < ok.shape[1]:
+            if not ok[i, k]:
+                k += 1; continue
+            j = k
+            while j < ok.shape[1] and ok[i, j]:
+                j += 1
+            if j - k >= min_len:
+                segs.append((i, dX[i, k:j + 1], dU[i, k:j]))
+            k = j
+    return segs
+
+
+def split(segs, n_traj, seed=cfg.SEED):
+    rng = np.random.default_rng(seed + 1)
+    perm = rng.permutation(n_traj)
+    a = int(cfg.DATA_SPLIT[0] * n_traj); b = a + int(cfg.DATA_SPLIT[1] * n_traj)
+    which = np.empty(n_traj, dtype="<U5")
+    which[perm[:a]], which[perm[a:b]], which[perm[b:]] = "train", "val", "test"
+    out = {"train": [], "val": [], "test": []}
+    for pid, sx, su in segs:
+        out[which[pid]].append((sx, su))
+    return out
+
+
+def pack(segs):
+    """List of segments -> flat arrays + offsets (npz friendly)."""
+    lens = np.array([len(su) for _, su in segs])
+    return dict(X=np.concatenate([sx for sx, _ in segs]),
+                U=np.concatenate([su for _, su in segs]),
+                lens=lens)
+
+
+def unpack(X, U, lens):
+    segs, ix, iu = [], 0, 0
+    for L in lens:
+        segs.append((X[ix:ix + L + 1], U[iu:iu + L]))
+        ix += L + 1; iu += L
+    return segs
+
+
+def pairs(segs):
+    """Segments -> one-step pairs (dx_k, du_k, dx_{k+1})."""
+    return (np.concatenate([sx[:-1] for sx, _ in segs]),
+            np.concatenate([su for _, su in segs]),
+            np.concatenate([sx[1:] for sx, _ in segs]))
+
+
+def load_data(path="results/ident_data.npz"):
+    d = np.load(path)
+    return {s: unpack(d[f"{s}_X"], d[f"{s}_U"], d[f"{s}_lens"])
+            for s in ("train", "val", "test")}
+
+
+# ======================================================================
+# Observables, fitting, prediction
+# ======================================================================
 STATE_NAMES = ["dq1", "dq2", "dqd1", "dqd2"]
 
 

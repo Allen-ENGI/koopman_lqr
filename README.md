@@ -55,24 +55,32 @@ Verify the import:
 The comparison is two simulations over the same conditions. Every variable
 that is changed lives in `config.py`, section 1 (EXPERIMENT VARIABLES):
 
-| Variable | Role | Config name |
-|---|---|---|
-| Initial angles (dq1, dq2) | Experiment 1: swept on a grid inside every condition | `MAP_N`, `MAP_RANGE` |
-| Observables | Experiment 2: one Koopman controller per set | `OBSERVABLES` |
-| Torque limit | Robustness: one condition per value | `TORQUE_LIMIT_MAIN`, `TORQUE_SCALE_SWEEP` |
-| Initial velocity | Robustness: one condition per value | `INIT_VELOCITY_MAIN`, `INIT_VELOCITY_SWEEP` |
+| Variable | Balance (Exp. 1, 2) | Tracking (Exp. 3) | Config name |
+|---|---|---|---|
+| Initial angles (dq1, dq2) | main: grid inside every condition, also grouped by distance from upright | fixed: starts on the letter | `MAP_N`, `MAP_RANGE`, `DISTANCE_EDGES` |
+| Observables | main: one Koopman controller per set | main: one Koopman controller per set | `OBSERVABLES`, `TRACK_OBSERVABLES` |
+| Region size | the distance bands of the map | two scenes: small letter near upright, large letters around the shoulder | `DISTANCE_EDGES`, `TRACK_SCENES`, `TRACK_RUN` |
+| Model error (physics designs only) | robustness (default) | robustness (default) | `MODEL_ERROR_SWEEP`, `ROBUSTNESS`, `TRACK_ROBUSTNESS` |
+| Torque limit, initial velocity, plant change, sensor noise | optional robustness | optional (plant, noise) | add to `ROBUSTNESS` / `TRACK_ROBUSTNESS` |
 
-Everything else in `config.py` is held fixed for both controllers.
+Robustness changes one variable at a time; the others stay at their main value.
+By default only model error runs: it is the robustness test that asks the
+research question (does data beat a wrong physics model?). Everything else in
+`config.py` is held fixed for both controllers.
 
-    python collect_data.py                 # identification data (once)
-    python scan_designs.py                 # design-choice scan on validation starts
-    python run_local_lqr.py --maps all     # SIMULATION 1: local LQR, every condition
-    python run_koopman.py                  # SIMULATION 2: Koopman fit, design, maps,
-                                           #   certificates, comparison figures
+    python plant.py                        # check: vectorized plant matches DFKI
+    python run_local_lqr.py --maps all     # SIMULATION 1: local LQR, main + ROBUSTNESS
+    python run_koopman.py                  # SIMULATION 2: data, fit, design, Koopman maps,
+                                           #   comparison figures (incl. by_distance.png)
+    python run_tracking.py --check         # Experiment 3: are the letters feasible?
+    python run_tracking.py                 # Experiment 3: both scenes, all controllers,
+                                           #   figures, GIFs, summary_scenes.md
+    python run_koopman.py --stage extra    # optional: design scan, Lyapunov certificates,
+                                           #   convergence rates
 
 `--maps main|robust|all` picks the conditions; `run_koopman.py --stage
-fit|design|maps|roa|figures` runs one stage. Maps are saved as
-`results/maps/<profile>-<realism>/<controller>__<condition>.npz`, so both
+data|fit|design|maps|figures` runs one stage. Balance maps are saved as
+`results/maps/<profile>-<realism>/<controller>__<condition>.npz`, so the
 simulations line up condition by condition. `MAIN_SIMULATOR` and
 `ROBUSTNESS_SIMULATOR` choose DFKI's simulator or its vectorized copy.
 
@@ -80,20 +88,17 @@ simulations line up condition by condition. `MAIN_SIMULATOR` and
 
 | File | Role |
 |---|---|
-| `config.py` | every parameter: plant, target, dt, Q/R, torque limit, data, dictionaries |
-| `plant_utils.py` | DFKI plant + simulator, equilibrium, Jacobians, ZOH discretization |
-| `dynamics_np.py` | vectorized copy of DFKI's dynamics (checked to ~1e-13) |
-| `lqr_design.py` | discrete LQR with stabilizability / detectability (PBH) checks |
-| `controllers.py` | one controller for all methods: `u = sat(u* - K psi(x - x*))` |
-| `metrics.py` | success, settling, RMSE, cost J, effort, saturation, tail rate, c_hat |
-| `collect_data.py` | Stage 3 data, segmented at angle wraps, split by trajectory |
-| `koopman.py` | dictionaries (polynomial, trig), EDMDc fit, multistep prediction |
-| `stability.py` | Koopman LQR design, true-plant local rates, sampled ROA certificate |
-| `scan_designs.py` | training region x dictionary x gain design, on validation starts |
-| `experiments.py` | turns section 1 of `config.py` into named conditions shared by both simulations |
-| `sweep.py` / `fast_sweep.py` | initial-angle maps for one condition (DFKI / vectorized) |
-| `run_koopman.py` | Stages 4-5 pipeline and all comparison figures |
-| `viz.py`, `style.py` | figure helpers and the shared colour/line-style per controller |
+| `config.py` | every parameter; section 1 = the experiment variables |
+| `plant.py` | DFKI plant and simulator, linearization, ZOH discretization, vectorized copy with inverse dynamics |
+| `tool_lib.py` | conditions, one-run simulation, initial-angle maps, metrics, tracking references, figure style and plotting |
+| `koopman.py` | identification data, observables (polynomial, trig), lifted least-squares fit, multistep prediction |
+| `control.py` | every controller design: LQR with PBH checks, local LQR, Koopman LQR, stability analysis, TVLQR, tracking controllers |
+| `run_local_lqr.py` | SIMULATION 1 (balance): local LQR |
+| `run_koopman.py` | SIMULATION 2 (balance): Koopman LQR and all comparison figures |
+| `run_tracking.py` | Experiment 3: drawing letters, small scene near upright and large scene around the shoulder (figures, GIFs, tables) |
+| `hardware.py` | parameters of the planned budget rig (`PLANT_PROFILE = "hardware"`) |
+
+Dependency order (no cycles): `config` -> `plant` -> `tool_lib` -> `koopman` -> `control` -> the three `run_*` scripts.
 
 ## Experiments and Results
 

@@ -1,9 +1,10 @@
 """Single source of truth for the comparison.
 
 Section 1 holds the EXPERIMENT VARIABLES: the only values you change to
-compare the two controllers.  Both simulations read them:
-    run_local_lqr.py   local-linearization LQR
-    run_koopman.py     Koopman LQR (one controller per observable set)
+compare the controllers.  Every script reads them:
+    run_local_lqr.py   balance, local-linearization LQR
+    run_koopman.py     balance, Koopman LQR (one controller per observable set)
+    run_tracking.py    tracking a letter, all controllers
 Everything after section 1 is held FIXED across every comparison.
 
 DFKI conventions (SymbolicDoublePendulum, formulas="UnderactuatedLecture"):
@@ -29,6 +30,9 @@ import numpy as np
 # (dq1, dq2) on an N x N grid; every controller runs from every point.
 MAP_N = 31                   # grid points per axis -> 31 x 31 = 961 starts
 MAP_RANGE = np.pi            # dq1, dq2 in [-MAP_RANGE, MAP_RANGE] rad
+# The maps are also summarized by distance of the start from upright,
+# sqrt(dq1^2 + dq2^2): "is Koopman better close to the target or far away?"
+DISTANCE_EDGES = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.5]   # rad, band edges
 
 # --- (b) Observables: Experiment 2 ------------------------------------
 # One Koopman controller per observable set z = psi(dx) = [dx ; extras]:
@@ -49,6 +53,61 @@ TORQUE_SCALE_SWEEP = [0.9, 1.1, 1.25]   # x the main torque limit
                                         # -> [3.6, 0.9], [4.4, 1.1], [5.0, 1.25] N m
 INIT_VELOCITY_SWEEP = [(2.0, 0.0), (-2.0, 0.0), (0.0, 3.0), (3.0, -3.0)]  # rad/s
 
+# --- (e) Model error: balance and tracking -----------------------------
+# Physics-based designs (local LQR, TVLQR, inverse-dynamics feedforward)
+# use a model whose link masses and inertias are scaled by this factor.
+# The simulated plant and the Koopman training data keep the true masses,
+# so this tests "physics model wrong, data right".
+MODEL_ERROR_MAIN = 1.0                 # 1.0 = exact model
+MODEL_ERROR_SWEEP = [0.8, 1.2]
+
+# --- (f) Plant change: BOTH experiments (balance and tracking) ---------
+# The SIMULATED arm's link masses and inertias are scaled; every controller
+# and the Koopman training data stay at the nominal plant, so all
+# controllers are equally blind to the change.
+PLANT_MASS_MAIN = 1.0                  # 1.0 = nominal arm
+PLANT_MASS_SWEEP = [0.8, 1.2]          # -20% / +20% mass
+
+# --- (g) Sensor noise level: BOTH experiments ---------------------------
+# Measurement noise std on [q1, q2, qd1, qd2] = level x NOISE_BASE
+# (NOISE_BASE: 14-bit encoder angles, numerically differentiated velocity).
+# Noisy conditions always run in DFKI's simulator.
+NOISE_BASE = [0.001, 0.001, 0.05, 0.05]   # rad, rad, rad/s, rad/s
+NOISE_LEVEL_MAIN = 0.0                 # 0 = perfect measurement
+NOISE_LEVEL_SWEEP = [1.0, 3.0]
+
+# --- Which robustness variables are run --------------------------------
+# Default: only MODEL ERROR (e).  It is the robustness test that asks the
+# research question ("when does data beat physics?").  Torque, velocity,
+# plant change and noise mostly show both controllers degrading alike; add
+# "torque", "velocity", "plant", "noise" for the full study (slower).
+ROBUSTNESS = ["model"]                 # balance (run_local_lqr.py, run_koopman.py)
+TRACK_ROBUSTNESS = ["model"]           # tracking (run_tracking.py)
+
+# --- (h) Experiment 3: drawing a letter (tracking a continuous path) -----
+# Two scenes = the same "small vs large region" question as the balance maps:
+#   small  a small letter above the shoulder, near upright: inside the
+#          region the balance Koopman models were trained on
+#   large  letters centred ON the shoulder, so the arm sweeps the whole
+#          workspace (through hanging-down).  The tip only reaches
+#          |l1 - l2| .. l1 + l2 (0.1-0.5 m) from the shoulder.
+# Varied: the observables (one Koopman controller per set) and TRACK_ROBUSTNESS.
+# Fixed per scene: letters, centre, size ("auto" = ring through the middle of
+# the reachable ring, radius max(l1, l2)), drawing time and torque limit.  The
+# elbow needs ~1 N m to hold link 2 level, which every large letter passes,
+# so the large scene allows 2 N m there.  Limits are capped at the motor
+# rating.  The tip starts at rest on the letter, draws it with minimum-jerk
+# timing, then holds the last point for TRACK_HOLD seconds.
+TRACK_SCENES = {
+    "small": dict(letters=["C"], center=(0.0, 0.40), size=0.10,
+                  draw_time=2.0, torque_limit=[4.0, 1.0]),
+    "large": dict(letters=["C", "G", "O"], center=(0.0, 0.0), size="auto",
+                  draw_time=4.0, torque_limit=[4.0, 2.0]),
+}
+TRACK_RUN = ["small", "large"]         # which scenes run_tracking.py runs
+TRACK_HOLD = 1.0                       # s at rest after drawing
+TRACK_OBSERVABLES = OBSERVABLES        # same observable sets as the balance experiments
+
 # --- Which simulator runs the maps ------------------------------------
 # "dfki": DFKI's own Simulator (any REALISM, ~3.5 min per 31 x 31 map on 2 cores)
 # "fast": vectorized copy of the same plant (matches DFKI to ~1e-13, ~30x
@@ -58,7 +117,8 @@ ROBUSTNESS_SIMULATOR = "fast"
 
 # --- Plant and sensing switches -----------------------------------------
 PLANT_PROFILE = "ideal"      # "ideal" (study plant) | "hardware" (budget rig, hardware.py)
-REALISM = "ideal"            # "ideal" | "realistic" (friction, noise, 5 ms delay)
+REALISM = "ideal"            # "ideal" | "realistic" (friction, torque noise, 5 ms
+                             # delay; measurement noise is the variable in (g))
 
 # =====================================================================
 # 2. FIXED for every comparison (same for both controllers)
@@ -114,10 +174,15 @@ else:
 
 assert np.all(np.asarray(TORQUE_LIMIT) <= np.asarray(MOTOR_TORQUE_LIMIT))
 
+# Active model error of the physics-based designs (tool_lib.apply_condition()
+# changes it per condition; plant.make_plant(for_design=True) reads it)
+MODEL_ERROR = MODEL_ERROR_MAIN
+# Active plant change (make_plant(for_design=False) and the fast simulator read it)
+PLANT_MASS = PLANT_MASS_MAIN
+
 # --------------------------------------------------------- sensing / actuation
 if REALISM == "ideal":
     COULOMB_FRIC = [0.0, 0.0]          # N m
-    MEAS_NOISE = [0.0, 0.0, 0.0, 0.0]  # std of [q1, q2, dq1, dq2]
     MEAS_DELAY = 0.0                   # s
     TORQUE_NOISE = [0.0, 0.0]          # N m std
     MOTOR_RESPONSIVENESS = 1.0         # 1 = torque applied instantly
@@ -125,12 +190,14 @@ elif REALISM == "realistic":
     # Coulomb friction ~2.5% of the motor rating; 14-bit encoders with
     # numerically differentiated velocity; one control period of delay.
     COULOMB_FRIC = list(0.025 * np.minimum(np.asarray(MOTOR_TORQUE_LIMIT), 4.0))
-    MEAS_NOISE = [0.001, 0.001, 0.05, 0.05]
     MEAS_DELAY = 0.005
     TORQUE_NOISE = list(0.005 * np.minimum(np.asarray(MOTOR_TORQUE_LIMIT), 4.0))
     MOTOR_RESPONSIVENESS = 0.8
 else:
     raise ValueError(REALISM)
+# Measurement noise is the noise-level variable (g), not part of REALISM;
+# set NOISE_LEVEL_MAIN = 1.0 to reproduce the earlier "realistic" setting.
+MEAS_NOISE = list(NOISE_LEVEL_MAIN * np.asarray(NOISE_BASE))
 
 # =====================================================================
 # 4. Koopman identification (fixed; same data for every observable set)
@@ -145,7 +212,7 @@ DATA_V_MAX = 15.0            # drop samples faster than this (rad/s)
 DATA_HOLD = (0.02, 0.10)     # s, random hold time of piecewise-constant inputs
 DATA_SPLIT = (0.6, 0.2, 0.2)
 # Fit only pairs with |dq1|, |dq2| <= KOOPMAN_R_TRAIN (chosen on validation
-# starts by scan_designs.py)
+# starts by run_koopman.py --stage scan)
 KOOPMAN_R_TRAIN = 0.6        # rad
 LQR_METHOD = "inf"           # same gain design for every model
 RIDGE_GRID = [0.0, 1e-8, 1e-6, 1e-4, 1e-2]   # relative ridge weights
@@ -154,6 +221,11 @@ PRED_PLOT_HORIZON = 0.5      # s, horizon shown in the prediction figure
 PRED_DICTS = OBSERVABLES + ["poly4"]          # quartic: prediction only
 CONTROL_DICTS = OBSERVABLES                    # older name, kept for scripts
 LIFTED_Q_EPS = 1e-6          # added on lifted states only if detectability fails
+# Tracking (Experiment 3) moves the arm far from upright, so its Koopman
+# models are refit on data covering the letter's angles:
+# |dq| <= max |dq| along the path + TRACK_R_MARGIN (all data for letters
+# drawn around the shoulder, which pass through hanging-down)
+TRACK_R_MARGIN = 0.2         # rad
 
 # =====================================================================
 # 5. Analysis settings
